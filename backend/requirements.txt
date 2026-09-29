@@ -9,3 +9,4 @@ httpx>=0.24.0
 pypdf>=3.9.0
 python-docx>=0.8.11
 hindsight-client>=0.1.0
+alembic>=1.11.0

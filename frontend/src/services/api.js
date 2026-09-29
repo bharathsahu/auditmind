@@ -9,11 +9,41 @@ const client = axios.create({
   }
 });
 
+// Attach Authorization header if JWT token is saved in localStorage
+client.interceptors.request.use((config) => {
+  const token = localStorage.getItem('auditmind_token');
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+}, (error) => {
+  return Promise.reject(error);
+});
+
 export const api = {
   // Auth
   login: async (username, password) => {
     const res = await client.post('/auth/login', { username, password });
+    if (res.data && res.data.token) {
+      localStorage.setItem('auditmind_token', res.data.token);
+      localStorage.setItem('auditmind_user', JSON.stringify(res.data.user));
+    }
     return res.data;
+  },
+
+  getCurrentUser: async () => {
+    const res = await client.get('/auth/me');
+    return res.data;
+  },
+
+  getAuditLogs: async () => {
+    const res = await client.get('/auth/logs');
+    return res.data;
+  },
+
+  logout: () => {
+    localStorage.removeItem('auditmind_token');
+    localStorage.removeItem('auditmind_user');
   },
 
   // Audits
@@ -63,9 +93,14 @@ export const api = {
     const formData = new FormData();
     formData.append('file', file);
     if (auditId) formData.append('audit_id', auditId);
-    const res = await axios.post(`${API_BASE}/documents/upload`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    });
+    
+    const token = localStorage.getItem('auditmind_token');
+    const headers = { 'Content-Type': 'multipart/form-data' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const res = await axios.post(`${API_BASE}/documents/upload`, formData, { headers });
     return res.data;
   },
 

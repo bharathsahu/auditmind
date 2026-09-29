@@ -1,20 +1,22 @@
 import os
 import httpx
+import json
 import logging
+import asyncio
+from typing import Dict, Any, List, AsyncGenerator
 from sqlalchemy.orm import Session
 from app.hindsight.client import hindsight_service
 from app.models.database import Audit, Finding, Remediation
-from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
 class AuditMindAgent:
     def __init__(self):
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
 
-    async def _call_external_llm(self, prompt: str, system_instruction: str) -> str:
-        """Call external LLM (Gemini or OpenAI) if API key is configured."""
+    async def _call_external_llm(self, prompt: str, system_instruction: str) -> Optional[str]:
+        """Call external LLM if configured."""
         if self.gemini_api_key:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -52,73 +54,96 @@ class AuditMindAgent:
 
         return None
 
-    async def process_user_query(self, db: Session, query: str, bank_id: str = "auditmind_org") -> Dict[str, Any]:
-        """Process any human natural language query using DB context + Hindsight memory + LLM reasoning."""
+    def _extract_citations(self, memories: List[Dict[str, Any]], findings: List[Finding]) -> List[Dict[str, str]]:
+        """Extract explicit citation references for response grounding."""
+        citations = []
+        for mem in memories:
+            ref_code = mem.get("reference_code") or f"MEM-{mem.get('id')}"
+            citations.append({
+                "type": mem.get("reference_type", "Memory"),
+                "code": ref_code,
+                "title": f"[{mem.get('year', 'N/A')}] {mem.get('category')}",
+                "snippet": mem.get("content", "")[:120] + "..."
+            })
+        for f in findings[:3]:
+            citations.append({
+                "type": "Finding",
+                "code": f.finding_code,
+                "title": f.title,
+                "snippet": f"Severity: {f.severity} | Owner: {f.remediation_owner}"
+            })
+        return citations
+
+    async def process_user_query(self, db: Session, query: str, bank_id: str = "auditmind_org", org_id: Optional[int] = None) -> Dict[str, Any]:
+        """Process natural language query with grounded context & citations."""
         query_text = query.strip()
         query_lower = query_text.lower()
-        
-        # 1. Execute Hindsight memory recall & reflection over memory bank
+
+        # 1. Hybrid Memory Recall
         memories = await hindsight_service.recall(db, query_text, limit=6, bank_id=bank_id)
         reflection = await hindsight_service.reflect(db, query_text, bank_id=bank_id)
 
-        # 2. Extract database facts
-        audits = db.query(Audit).all()
-        findings = db.query(Finding).all()
-        remediations = db.query(Remediation).all()
+        # 2. Extract live database context
+        findings_query = db.query(Finding)
+        audits_query = db.query(Audit)
+        remediations_query = db.query(Remediation)
+
+        if org_id:
+            findings_query = findings_query.filter(Finding.organization_id == org_id)
+            audits_query = audits_query.filter(Audit.organization_id == org_id)
+            remediations_query = remediations_query.filter(Remediation.organization_id == org_id)
+
+        audits = audits_query.all()
+        findings = findings_query.all()
+        remediations = remediations_query.all()
 
         open_findings = [f for f in findings if f.status in ("Open", "In Progress")]
         overdue_remediations = [r for r in remediations if r.status == "Overdue"]
         high_risk_findings = [f for f in findings if f.severity in ("High", "Critical")]
 
-        # Prepare context payload for LLM or Conversational Engine
+        # Prepare Citations
+        citations = self._extract_citations(memories, high_risk_findings if "risk" in query_lower else open_findings)
+
+        # 3. LLM Prompt Construction
         memory_str = "\n".join([f"- [{m.get('year', 'N/A')}] {m.get('reference_code', 'N/A')}: {m.get('content')}" for m in memories]) if memories else "No prior memories recalled."
-        
         db_summary = (
             f"Current DB Stats: Audits={len(audits)}, Open Findings={len(open_findings)}, "
             f"Overdue Remediations={len(overdue_remediations)}, High Risk Findings={len(high_risk_findings)}.\n"
-            f"High Risk Findings: {', '.join([f'{f.finding_code} ({f.title})' for f in high_risk_findings])}.\n"
-            f"Overdue Remediations: {', '.join([f'{r.action} (Owner: {r.owner}, Due: {r.due_date})' for r in overdue_remediations])}."
+            f"High Risk Findings: {', '.join([f'{f.finding_code} ({f.title})' for f in high_risk_findings])}."
         )
 
         system_instruction = (
-            "You are AuditMind AI, a friendly, warm, highly intelligent internal audit & compliance companion. "
-            "You speak naturally like a helpful, supportive expert colleague. "
-            "Always combine current DB information and Hindsight persistent organizational memory. "
-            "Never invent fake audit findings. Be encouraging, clear, and structured."
+            "You are AuditMind AI, an intelligent internal audit & compliance companion. "
+            "Always ground your response strictly in the provided database facts and Hindsight persistent organizational memory. "
+            "Never invent fake audit findings. Provide source citations using bracket format, e.g. [Ref: FND-2026-031]."
         )
 
-        prompt = (
-            f"User Asked: \"{query_text}\"\n\n"
-            f"Recalled Hindsight Memories:\n{memory_str}\n\n"
-            f"Current DB Facts:\n{db_summary}\n\n"
-            "Please provide a friendly, helpful, human-like response answering their question clearly with bullet points and actionable advice."
-        )
+        prompt = f"User Question: \"{query_text}\"\n\nRecalled Memories:\n{memory_str}\n\nDB Facts:\n{db_summary}"
 
-        # 3. Try calling external LLM if configured
         llm_response = await self._call_external_llm(prompt, system_instruction)
         if llm_response:
             return {
                 "query": query_text,
                 "response": llm_response,
+                "citations": citations,
                 "recalled_memories": memories,
                 "bank_id": bank_id
             }
 
-        # 4. Built-in Warm & Friendly Natural Language Conversation Engine Fallback
+        # 4. Fallback Rule-Based Conversational Engine
         greeting = "Hi there! " if any(w in query_lower for w in ["hi", "hello", "hey", "greetings"]) else ""
         response_text = ""
 
-        # Friendly Natural Language Understanding Logic
         if any(w in query_lower for w in ["before", "seen", "history", "previous", "earlier", "past", "recurring", "repeat", "happened"]):
             response_text += f"{greeting}I searched our organization's **Hindsight Persistent Memory Layer** for you.\n\n"
             if memories:
-                response_text += f"Yes! I found **{len(memories)} historical occurrences** related to your question:\n\n"
+                response_text += f"Yes! I found **{len(memories)} historical occurrences** related to your query:\n\n"
                 for idx, mem in enumerate(memories, 1):
                     yr = mem.get('year', 'N/A')
                     ref = mem.get('reference_code', 'N/A')
                     cat = mem.get('category', 'Audit')
                     content = mem.get('content')
-                    response_text += f"**{idx}. [{yr}] {ref} ({cat})**\n> {content}\n\n"
+                    response_text += f"**{idx}. [{yr}] {ref} ({cat})** [Ref: {ref}]\n> {content}\n\n"
 
                 response_text += "💡 **Pattern & Insights**:\n"
                 response_text += "Historically, transaction approval issues recurred across 2024, 2025, and 2026 due to emergency single-approver overrides and API sync lags. Corrective action requires enforcing hard-stop automated dual authorization."
@@ -134,45 +159,59 @@ class AuditMindAgent:
                 response_text += "**Action Items Requiring Immediate Attention:**\n"
                 for r in overdue_remediations:
                     finding = db.query(Finding).filter(Finding.id == r.finding_id).first()
+                    f_code = finding.finding_code if finding else "FND-000"
                     f_title = finding.title if finding else "Audit Finding"
-                    response_text += f"👉 **{r.owner}**: {r.action} (Target Due Date: `{r.due_date}`) — *Related to {f_title}*\n"
+                    response_text += f"👉 **{r.owner}**: {r.action} (Target Due Date: `{r.due_date}`) — *Related to {f_title}* [Ref: {f_code}]\n"
             else:
                 response_text += "Great news! None of our active remediation items are currently overdue."
 
         elif any(w in query_lower for w in ["risk", "critical", "high", "danger", "severe", "threat"]):
             response_text += f"{greeting}Here is our current high-risk compliance overview:\n\n"
-            response_text += f"We currently have **{len(high_risk_findings)} High & Critical Severity Findings** in the organization:\n\n"
+            response_text += f"We currently have **{len(high_risk_findings)} High & Critical Severity Findings**:\n\n"
             for f in high_risk_findings:
-                response_text += f"⚠️ **{f.finding_code} ({f.severity} Severity)**: {f.title}\n"
+                response_text += f"⚠️ **{f.finding_code} ({f.severity} Severity)** [Ref: {f.finding_code}]: {f.title}\n"
                 response_text += f"   - *Control Involved*: {f.control_involved}\n"
                 response_text += f"   - *Owner*: {f.remediation_owner} (Status: `{f.status}`)\n\n"
 
             if memories:
-                response_text += "📜 **Historical High-Risk Memory Context**:\n"
+                response_text += "📜 **Historical High-Risk Context**:\n"
                 for mem in memories[:2]:
-                    response_text += f"• [{mem.get('year')}] {mem.get('content')}\n"
-
-        elif any(w in query_lower for w in ["who", "owner", "responsible", "lead", "team"]):
-            response_text += f"{greeting}Here are the key teams and owners responsible for active audit items:\n\n"
-            for f in open_findings:
-                response_text += f"👤 **{f.remediation_owner}**: Responsible for `{f.finding_code}` ({f.title}) — Due: `{f.due_date}`\n"
+                    response_text += f"• [{mem.get('year')}] {mem.get('content')} [Ref: {mem.get('reference_code')}]\n"
 
         else:
-            response_text += f"{greeting}I checked both our live audit records and **Hindsight organizational memory** for you.\n\n"
+            response_text += f"{greeting}I analyzed our database records ({len(audits)} Audits, {len(findings)} Findings) and **Hindsight organizational memory**.\n\n"
             if memories:
-                response_text += "Here is what Hindsight recalled regarding your question:\n\n"
+                response_text += "Recalled evidence:\n\n"
                 for mem in memories[:3]:
-                    response_text += f"• **[{mem.get('year')}] {mem.get('reference_code')}**: {mem.get('content')}\n"
+                    response_text += f"• **[{mem.get('year')}] {mem.get('reference_code')}**: {mem.get('content')} [Ref: {mem.get('reference_code')}]\n"
                 response_text += f"\n\n**Synthesized Insight**:\n{reflection.get('synthesis', '')}"
             else:
-                response_text += f"I analyzed our current system records ({len(audits)} Audits, {len(findings)} Findings). "
-                response_text += f"Feel free to ask me about past audits, specific finding codes, control failures, or overdue items!"
+                response_text += f"Feel free to ask me about past audits, finding codes, control failures, or overdue remediations!"
 
         return {
             "query": query_text,
             "response": response_text,
+            "citations": citations,
             "recalled_memories": memories,
             "bank_id": bank_id
         }
+
+    async def stream_user_query(self, db: Session, query: str, bank_id: str = "auditmind_org", org_id: Optional[int] = None) -> AsyncGenerator[str, None]:
+        """Stream AI answer tokens in Server-Sent Events (SSE) format."""
+        result = await self.process_user_query(db, query, bank_id=bank_id, org_id=org_id)
+        full_text = result.get("response", "")
+        citations = result.get("citations", [])
+
+        # Stream text token chunks
+        words = full_text.split()
+        for i in range(0, len(words), 3):
+            chunk = " ".join(words[i:i+3]) + " "
+            event_data = json.dumps({"token": chunk, "type": "content"})
+            yield f"data: {event_data}\n\n"
+            await asyncio.sleep(0.02)
+
+        # Stream final citations event
+        citation_event = json.dumps({"citations": citations, "type": "citations_done"})
+        yield f"data: {citation_event}\n\n"
 
 audit_agent = AuditMindAgent()

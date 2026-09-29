@@ -1,13 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
 from app.models.database import init_db, SessionLocal
 from app.demo_data import seed_demo_data
 from app.api import audits, findings, remediations, documents, ai, hindsight_api, auth, reports
 
 app = FastAPI(
-    title="AuditMind API",
+    title=settings.PROJECT_NAME,
     description="AI Compliance & Audit Memory Agent Backend powered by Hindsight Memory Layer",
-    version="1.0.0"
+    version=settings.VERSION
 )
 
 app.add_middleware(

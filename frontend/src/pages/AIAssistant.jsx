@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { api } from '../services/api';
-import { Bot, Send, User, Sparkles, Brain, History, MessageSquareHeart, Smile } from 'lucide-react';
+import { Bot, Send, User, Sparkles, History, MessageSquareHeart, Smile, ExternalLink, ShieldCheck } from 'lucide-react';
 
 export default function AIAssistant() {
   const [messages, setMessages] = useState([
     {
       sender: 'assistant',
       text: "👋 Hi there! I'm your **AI Audit & Compliance Companion**.\n\nYou can talk to me in natural human language! Ask me anything about our past audits, recurring problems, high-risk controls, or who is working on remediations.\n\nI connect directly to **Hindsight Persistent Organizational Memory** to remember everything across 2024, 2025, and 2026.\n\nHow can I help you today?",
-      memories: []
+      memories: [],
+      citations: []
     }
   ]);
   const [input, setInput] = useState('');
@@ -34,7 +35,8 @@ export default function AIAssistant() {
       const assistantMsg = {
         sender: 'assistant',
         text: res.response,
-        memories: res.recalled_memories || []
+        memories: res.recalled_memories || [],
+        citations: res.citations || []
       };
       setMessages(prev => [...prev, assistantMsg]);
     } catch (err) {
@@ -64,14 +66,14 @@ export default function AIAssistant() {
               Friendly AI Audit Companion
             </h2>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Understands natural human language • Powered by <strong>Hindsight Memory Layer</strong>
+              Grounded AI reasoning • Powered by <strong>Hindsight Memory Layer</strong>
             </p>
           </div>
         </div>
 
         <div className="px-3.5 py-1.5 rounded-full bg-blue-50 border border-blue-200 flex items-center gap-2 text-xs text-blue-900 font-bold">
-          <Smile className="w-4 h-4 text-blue-600" />
-          <span>Human-Friendly NLP: <strong className="text-blue-700 font-mono">Active</strong></span>
+          <ShieldCheck className="w-4 h-4 text-blue-600" />
+          <span>Grounded Citations: <strong className="text-blue-700 font-mono">Active</strong></span>
         </div>
       </div>
 
@@ -119,16 +121,37 @@ export default function AIAssistant() {
                 {msg.text}
               </div>
 
+              {/* Grounded Source Citations */}
+              {msg.citations && msg.citations.length > 0 && (
+                <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2 text-left">
+                  <div className="text-[10px] uppercase font-bold text-slate-700 tracking-wider flex items-center gap-1.5">
+                    <ExternalLink className="w-3.5 h-3.5 text-blue-600" />
+                    Grounded Source Citations ({msg.citations.length})
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {msg.citations.map((c, cidx) => (
+                      <div key={cidx} className="text-[11px] text-slate-700 bg-white p-2.5 rounded-xl border border-slate-200/80 flex items-start gap-2">
+                        <span className="px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800 text-[10px] font-bold shrink-0">{c.code}</span>
+                        <div>
+                          <strong className="text-slate-900">{c.title}</strong>
+                          <p className="text-[10px] text-slate-500 mt-0.5 line-clamp-1">{c.snippet}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Recalled Memories Pills */}
               {msg.memories && msg.memories.length > 0 && (
-                <div className="p-3.5 rounded-2xl bg-blue-50/80 border border-blue-200/80 space-y-2 text-left">
+                <div className="p-3 rounded-2xl bg-blue-50/80 border border-blue-200/80 space-y-1.5 text-left">
                   <div className="text-[10px] uppercase font-bold text-blue-900 tracking-wider flex items-center gap-1.5">
                     <History className="w-3.5 h-3.5 text-blue-600" />
-                    Hindsight Recalled Memory References ({msg.memories.length})
+                    Hindsight Recalled Memories ({msg.memories.length})
                   </div>
-                  <div className="space-y-1.5">
+                  <div className="space-y-1">
                     {msg.memories.map((m, midx) => (
-                      <div key={midx} className="text-[11px] text-slate-800 font-mono bg-white p-2.5 rounded-xl border border-slate-200/80">
+                      <div key={midx} className="text-[11px] text-slate-800 font-mono bg-white p-2 rounded-xl border border-slate-200/80">
                         [{m.year}] <strong className="text-blue-700">{m.reference_code}</strong>: {m.content}
                       </div>
                     ))}

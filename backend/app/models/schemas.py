@@ -2,6 +2,48 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
+class TokenData(BaseModel):
+    username: Optional[str] = None
+    role: Optional[str] = None
+    organization_id: Optional[int] = None
+
+class UserBase(BaseModel):
+    username: str
+    email: str
+    full_name: str
+    role: str = "Auditor"
+    organization_id: Optional[int] = None
+    is_active: bool = True
+
+class UserCreate(UserBase):
+    password: str
+
+class UserResponse(UserBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class LoginResponse(BaseModel):
+    token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+class AuditLogResponse(BaseModel):
+    id: int
+    user_id: Optional[int]
+    organization_id: Optional[int]
+    action_type: str
+    entity_name: Optional[str]
+    entity_id: Optional[str]
+    details: Optional[str]
+    ip_address: Optional[str]
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
 class AuditBase(BaseModel):
     name: str
     department: str

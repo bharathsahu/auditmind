@@ -1,74 +1,67 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import List
-from app.models.database import get_db, Audit
+from app.models.database import get_db, User
 from app.models.schemas import AuditCreate, AuditResponse
-from app.hindsight.client import hindsight_service
+from app.services.audit_service import audit_service
+from app.services.auth_service import get_current_user, require_roles
+from app.services.audit_log_service import audit_log_service
 
 router = APIRouter(prefix="/api/audits", tags=["Audits"])
 
 @router.get("", response_model=List[AuditResponse])
-def get_audits(db: Session = Depends(get_db)):
-    audits = db.query(Audit).order_by(Audit.id.desc()).all()
-    return audits
+def get_audits(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return audit_service.get_audits(db, org_id=current_user.organization_id)
 
 @router.get("/{audit_id}", response_model=AuditResponse)
-def get_audit(audit_id: int, db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id).first()
+def get_audit(audit_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    audit = audit_service.get_audit(db, audit_id, org_id=current_user.organization_id)
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     return audit
 
 @router.post("", response_model=AuditResponse)
-async def create_audit(audit_data: AuditCreate, db: Session = Depends(get_db)):
-    count = db.query(Audit).count() + 1
-    audit_code = f"AUD-2026-{count:03d}"
+async def create_audit(
+    audit_data: AuditCreate, 
+    request: Request,
+    current_user: User = Depends(require_roles(["Admin", "Lead Auditor", "Auditor"])), 
+    db: Session = Depends(get_db)
+):
+    saved_audit = await audit_service.create_audit(db, audit_data, org_id=current_user.organization_id)
     
-    audit = Audit(
-        audit_code=audit_code,
-        name=audit_data.name,
-        department=audit_data.department,
-        audit_type=audit_data.audit_type,
-        risk_level=audit_data.risk_level,
-        status=audit_data.status,
-        start_date=audit_data.start_date,
-        end_date=audit_data.end_date,
-        auditor=audit_data.auditor,
-        description=audit_data.description
-    )
-    db.add(audit)
-    db.commit()
-    db.refresh(audit)
-
-    # Automatically retain audit creation in Hindsight memory
-    await hindsight_service.retain(
+    # Immutable Audit Log
+    audit_log_service.log(
         db=db,
-        content=f"Audit Created: {audit.name} ({audit.audit_code}) in {audit.department} department. Risk: {audit.risk_level}. Auditor: {audit.auditor}.",
-        category="Audit History",
-        reference_type="Audit",
-        reference_code=audit.audit_code,
-        tags=["audit_creation", audit.department.lower(), audit.risk_level.lower()],
-        year=2026
+        action_type="AUDIT_CREATE",
+        user=current_user,
+        entity_name="Audit",
+        entity_id=saved_audit.audit_code,
+        details={"name": saved_audit.name, "department": saved_audit.department},
+        request=request
     )
-
-    return audit
+    
+    return saved_audit
 
 @router.put("/{audit_id}", response_model=AuditResponse)
-def update_audit(audit_id: int, audit_data: AuditCreate, db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id).first()
+def update_audit(
+    audit_id: int, 
+    audit_data: AuditCreate, 
+    request: Request,
+    current_user: User = Depends(require_roles(["Admin", "Lead Auditor"])), 
+    db: Session = Depends(get_db)
+):
+    audit = audit_service.update_audit(db, audit_id, audit_data, org_id=current_user.organization_id)
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
-    audit.name = audit_data.name
-    audit.department = audit_data.department
-    audit.audit_type = audit_data.audit_type
-    audit.risk_level = audit_data.risk_level
-    audit.status = audit_data.status
-    audit.start_date = audit_data.start_date
-    audit.end_date = audit_data.end_date
-    audit.auditor = audit_data.auditor
-    audit.description = audit_data.description
+    audit_log_service.log(
+        db=db,
+        action_type="AUDIT_UPDATE",
+        user=current_user,
+        entity_name="Audit",
+        entity_id=audit.audit_code,
+        details={"name": audit.name},
+        request=request
+    )
 
-    db.commit()
-    db.refresh(audit)
     return audit
